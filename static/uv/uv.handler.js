@@ -92,23 +92,23 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         enumerable: false,
     });
 
-    if (window.localStorage) {
-        for (const key in window.localStorage) {
-            if (key.startsWith(methodPrefix + __uv.location.origin + '@')) {
-                __uv.localStorageObj[key.slice((methodPrefix + __uv.location.origin + '@').length)] = window.localStorage.getItem(key);
+    // Shared utility: initialize storage from a native storage object
+    function initStorageFrom(nativeStorage, storageObj) {
+        const prefix = methodPrefix + __uv.location.origin + '@';
+        for (const key in nativeStorage) {
+            if (key.startsWith(prefix)) {
+                storageObj[key.slice(prefix.length)] = nativeStorage.getItem(key);
             };
         };
+    };
 
+    if (window.localStorage) {
+        initStorageFrom(window.localStorage, __uv.localStorageObj);
         __uv.lsWrap = client.storage.emulate(client.storage.localStorage, __uv.localStorageObj);
     };
 
     if (window.sessionStorage) {
-        for (const key in window.sessionStorage) {
-            if (key.startsWith(methodPrefix + __uv.location.origin + '@')) {
-                __uv.sessionStorageObj[key.slice((methodPrefix + __uv.location.origin + '@').length)] = window.sessionStorage.getItem(key);
-            };
-        };
-
+        initStorageFrom(window.sessionStorage, __uv.sessionStorageObj);
         __uv.ssWrap = client.storage.emulate(client.storage.sessionStorage, __uv.sessionStorageObj);
     };
 
@@ -182,32 +182,30 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         event.data.input = __uv.rewriteUrl(event.data.input);
     });
 
-    client.fetch.on('requestUrl', event => {
+    // Shared utility: source event.data.value in-place
+    function sourceEventValue(event) {
         event.data.value = __uv.sourceUrl(event.data.value);
-    });
+    };
 
-    client.fetch.on('responseUrl', event => {
-        event.data.value = __uv.sourceUrl(event.data.value);
-    });
+    client.fetch.on('requestUrl', sourceEventValue);
+    client.fetch.on('responseUrl', sourceEventValue);
 
     // XMLHttpRequest
     client.xhr.on('open', event => {
         event.data.input = __uv.rewriteUrl(event.data.input);
     });
 
-    client.xhr.on('responseUrl', event => {
-        event.data.value = __uv.sourceUrl(event.data.value);
-    });
+    client.xhr.on('responseUrl', sourceEventValue);
 
+
+    // Shared utility: rewrite event.data.url in-place
+    function rewriteEventUrl(event) {
+        event.data.url = __uv.rewriteUrl(event.data.url);
+    };
 
     // Workers
-    client.workers.on('worker', event => {
-        event.data.url = __uv.rewriteUrl(event.data.url);
-    });
-
-    client.workers.on('addModule', event => {
-        event.data.url = __uv.rewriteUrl(event.data.url);
-    });
+    client.workers.on('worker', rewriteEventUrl);
+    client.workers.on('addModule', rewriteEventUrl);
 
     client.workers.on('importScripts', event => {
         for (const i in event.data.scripts) {
@@ -227,9 +225,7 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
     });
 
     // Navigator
-    client.navigator.on('sendBeacon', event => {
-        event.data.url = __uv.rewriteUrl(event.data.url);
-    });
+    client.navigator.on('sendBeacon', rewriteEventUrl);
 
     // Cookies
     client.document.on('getCookie', event => {
@@ -305,38 +301,29 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         //event.data.value = __uv.sourceHtml(event.data.value, { document: event.that.tagName === 'HTML' });
     });
 
-    client.document.on('write', event => {
+    // Shared handler for document write/writeln (identical logic)
+    function handleDocumentWrite(event) {
         if (!event.data.html.length) return false;
         event.data.html = [__uv.rewriteHtml(event.data.html.join(''))];
-    });
+    };
 
-    client.document.on('writeln', event => {
-        if (!event.data.html.length) return false;
-        event.data.html = [__uv.rewriteHtml(event.data.html.join(''))];
-    });
+    client.document.on('write', handleDocumentWrite);
+    client.document.on('writeln', handleDocumentWrite);
 
     client.element.on('insertAdjacentHTML', event => {
         event.data.html = __uv.rewriteHtml(event.data.html);
     });
 
     // EventSource
+    client.eventSource.on('construct', rewriteEventUrl);
+    client.eventSource.on('url', rewriteEventUrl);
 
-    client.eventSource.on('construct', event => {
-        event.data.url = __uv.rewriteUrl(event.data.url);
-    });
-
-
-    client.eventSource.on('url', event => {
-        event.data.url = __uv.rewriteUrl(event.data.url);
-    });
-
-    // History
-    client.history.on('replaceState', event => {
+    // History — shared handler for pushState/replaceState
+    function handleHistoryNavigation(event) {
         if (event.data.url) event.data.url = __uv.rewriteUrl(event.data.url, '__uv' in event.that ? event.that.__uv.meta : __uv.meta);
-    });
-    client.history.on('pushState', event => {
-        if (event.data.url) event.data.url = __uv.rewriteUrl(event.data.url, '__uv' in event.that ? event.that.__uv.meta : __uv.meta);
-    });
+    };
+    client.history.on('replaceState', handleHistoryNavigation);
+    client.history.on('pushState', handleHistoryNavigation);
 
     // Element get set attribute methods
     client.element.on('getAttribute', event => {
@@ -396,6 +383,21 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         if (event.data.value.startsWith(window.location.origin)) event.data.value = __uv.sourceUrl(event.data.value);
     });
 
+    // Shared utility: rewrite attribute value based on attribute type
+    function rewriteAttrValue(name, value) {
+        if (__uv.attrs.isUrl(name)) return __uv.rewriteUrl(value);
+        if (__uv.attrs.isStyle(name)) return __uv.rewriteCSS(value, { context: 'declarationList' });
+        if (__uv.attrs.isHtml(name)) return __uv.rewriteHtml(value, {...__uv.meta, document: true, injectHead:__uv.createHtmlInject(__uv.handlerScript, __uv.bundleScript, __uv.configScript, __uv.cookieStr, window.location.href) });
+        if (__uv.attrs.isSrcset(name)) return __uv.html.wrapSrcset(value);
+        return null;
+    };
+
+    // Shared utility: store original attr and rewrite value
+    function storeAndRewrite(setAttrFn, element, name, value) {
+        setAttrFn.call(element, __uv.attributePrefix + '-attr-' + name, value);
+        return rewriteAttrValue(name, value);
+    };
+
     client.element.on('setAttribute', event => {
         if (event.that instanceof HTMLMediaElement && event.data.name === 'src' && event.data.value.startsWith('blob:')) {
             event.target.call(event.that, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
@@ -403,24 +405,9 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
             return;
         };
 
-        if (__uv.attrs.isUrl(event.data.name)) {
-            event.target.call(event.that, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.rewriteUrl(event.data.value);
-        };
-
-        if (__uv.attrs.isStyle(event.data.name)) {
-            event.target.call(event.that, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.rewriteCSS(event.data.value, { context: 'declarationList' });
-        };
-
-        if (__uv.attrs.isHtml(event.data.name)) {
-            event.target.call(event.that, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.rewriteHtml(event.data.value, {...__uv.meta, document: true, injectHead:__uv.createHtmlInject(__uv.handlerScript, __uv.bundleScript, __uv.configScript, __uv.cookieStr, window.location.href) });
-        };
-
-        if (__uv.attrs.isSrcset(event.data.name)) {
-            event.target.call(event.that, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.html.wrapSrcset(event.data.value);
+        const rewritten = storeAndRewrite(event.target, event.that, event.data.name, event.data.value);
+        if (rewritten !== null) {
+            event.data.value = rewritten;
         };
 
         if (__uv.attrs.isForbidden(event.data.name)) {
@@ -428,28 +415,27 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         };
     });
 
-    client.element.on('audio', event => {
-        event.data.url = __uv.rewriteUrl(event.data.url);
-    });
+    client.element.on('audio', rewriteEventUrl);
+
+    // Shared utility: create a URL-based hookProperty descriptor (get sources, set rewrites)
+    function urlPropertyHook(attrName) {
+        return {
+            get: (target, that) => {
+                return __uv.sourceUrl(target.call(that));
+            },
+            set: (target, that, [val]) => {
+                client.element.setAttribute.call(that, __uv.attributePrefix + '-attr-' + attrName, val);
+                target.call(that, __uv.rewriteUrl(val));
+            },
+        };
+    };
 
     // Element Property Attributes
-    client.element.hookProperty([HTMLAnchorElement, HTMLAreaElement, HTMLLinkElement, HTMLBaseElement], 'href', {
-        get: (target, that) => {
-            return __uv.sourceUrl(
-                target.call(that)
-            );
-        },
-        set: (target, that, [val]) => {
-            client.element.setAttribute.call(that, __uv.attributePrefix + '-attr-href', val)
-            target.call(that, __uv.rewriteUrl(val));
-        },
-    }); 
+    client.element.hookProperty([HTMLAnchorElement, HTMLAreaElement, HTMLLinkElement, HTMLBaseElement], 'href', urlPropertyHook('href'));
 
     client.element.hookProperty([HTMLScriptElement, HTMLAudioElement, HTMLVideoElement,  HTMLMediaElement, HTMLImageElement, HTMLInputElement, HTMLEmbedElement, HTMLIFrameElement, HTMLTrackElement, HTMLSourceElement], 'src', {
         get: (target, that) => {
-            return __uv.sourceUrl(
-                target.call(that)
-            );
+            return __uv.sourceUrl(target.call(that));
         },
         set: (target, that, [val]) => {
             if (new String(val).toString().trim().startsWith('blob:') && that instanceof HTMLMediaElement) {
@@ -462,17 +448,7 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         },
     });
 
-    client.element.hookProperty([HTMLFormElement], 'action', {
-        get: (target, that) => {
-            return __uv.sourceUrl(
-                target.call(that)
-            );
-        },
-        set: (target, that, [val]) => {
-            client.element.setAttribute.call(that, __uv.attributePrefix + '-attr-action', val)
-            target.call(that, __uv.rewriteUrl(val));
-        },
-    });
+    client.element.hookProperty([HTMLFormElement], 'action', urlPropertyHook('action'));
 
     client.element.hookProperty([HTMLImageElement], 'srcset', {
         get: (target, that) => {
@@ -566,13 +542,12 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         event.respondWith(__uv.domain = event.data.value);
     })
 
-    client.document.on('url', event => {
+    // Shared handler for document URL properties (url and documentURI are identical)
+    function handleDocumentUrl(event) {
         event.data.value = __uv.location.href;
-    });
-
-    client.document.on('documentURI', event => {
-        event.data.value = __uv.location.href;
-    });
+    };
+    client.document.on('url', handleDocumentUrl);
+    client.document.on('documentURI', handleDocumentUrl);
 
     client.document.on('referrer', event => {
         event.data.value = __uv.referrer || __uv.sourceUrl(event.data.value);
@@ -591,26 +566,10 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
     });
 
     client.attribute.on('setValue', event => {
-        if (__uv.attrs.isUrl(event.data.name)) {
-            client.element.setAttribute.call(event.that.ownerElement, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.rewriteUrl(event.data.value);
+        const rewritten = storeAndRewrite(client.element.setAttribute, event.that.ownerElement, event.data.name, event.data.value);
+        if (rewritten !== null) {
+            event.data.value = rewritten;
         };
-
-        if (__uv.attrs.isStyle(event.data.name)) {
-            client.element.setAttribute.call(event.that.ownerElement, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.rewriteCSS(event.data.value, { context: 'declarationList' });
-        };
-
-        if (__uv.attrs.isHtml(event.data.name)) {
-            client.element.setAttribute.call(event.that.ownerElement, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.rewriteHtml(event.data.value, {...__uv.meta, document: true, injectHead:__uv.createHtmlInject(__uv.handlerScript, __uv.bundleScript, __uv.configScript, __uv.cookieStr, window.location.href) });
-        };
-
-        if (__uv.attrs.isSrcset(event.data.name)) {
-            client.element.setAttribute.call(event.that.ownerElement, __uv.attributePrefix + '-attr-' + event.data.name, event.data.value);
-            event.data.value = __uv.html.wrapSrcset(event.data.value);
-        };
-
     });
 
     // URL
@@ -633,47 +592,44 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         };
     });
 
-    client.storage.on('get', event => {
-        event.data.name = methodPrefix + __uv.meta.url.origin + '@' + event.data.name;
-    });
+    // Shared utility: prefix a storage key with the origin namespace
+    function prefixStorageKey(name) {
+        return methodPrefix + __uv.meta.url.origin + '@' + name;
+    };
 
-    client.storage.on('set', event => {
+    // Shared utility: handle storage events that only need key prefixing
+    function handleStorageGetEvent(event) {
+        event.data.name = prefixStorageKey(event.data.name);
+    };
+
+    // Shared utility: handle storage set events (update obj + prefix key)
+    function handleStorageSetEvent(event) {
         if (event.that.__uv$storageObj) {
             event.that.__uv$storageObj[event.data.name] = event.data.value;
         };
-        event.data.name = methodPrefix + __uv.meta.url.origin + '@' + event.data.name;
-    });
+        event.data.name = prefixStorageKey(event.data.name);
+    };
 
-    client.storage.on('delete', event => {
+    // Shared utility: handle storage delete events (remove from obj + prefix key)
+    function handleStorageDeleteEvent(event) {
         if (event.that.__uv$storageObj) {
             delete event.that.__uv$storageObj[event.data.name];
         };
-        event.data.name = methodPrefix + __uv.meta.url.origin + '@' + event.data.name;
-    });
+        event.data.name = prefixStorageKey(event.data.name);
+    };
 
-    client.storage.on('getItem', event => {
-        event.data.name = methodPrefix + __uv.meta.url.origin + '@' + event.data.name;
-    });
-
-    client.storage.on('setItem', event => {
-        if (event.that.__uv$storageObj) {
-            event.that.__uv$storageObj[event.data.name] = event.data.value;
-        };
-        event.data.name = methodPrefix + __uv.meta.url.origin + '@' + event.data.name;
-    });
-
-    client.storage.on('removeItem', event => {
-        if (event.that.__uv$storageObj) {
-            delete event.that.__uv$storageObj[event.data.name];
-        };
-        event.data.name = methodPrefix + __uv.meta.url.origin + '@' + event.data.name;
-    });
+    client.storage.on('get', handleStorageGetEvent);
+    client.storage.on('set', handleStorageSetEvent);
+    client.storage.on('delete', handleStorageDeleteEvent);
+    client.storage.on('getItem', handleStorageGetEvent);
+    client.storage.on('setItem', handleStorageSetEvent);
+    client.storage.on('removeItem', handleStorageDeleteEvent);
 
     client.storage.on('clear', event => {
         if (event.that.__uv$storageObj) {
             for (const key of client.nativeMethods.keys.call(null, event.that.__uv$storageObj)) {
                 delete event.that.__uv$storageObj[key];
-                client.storage.removeItem.call(event.that, methodPrefix + __uv.meta.url.origin + '@' + key);
+                client.storage.removeItem.call(event.that, prefixStorageKey(key));
                 event.respondWith();
             };
         };
@@ -785,25 +741,34 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
 
     });
 
+    // Shared utility: create CSS options with meta context
+    function cssValueOpts() {
+        return { context: 'value', ...__uv.meta };
+    };
+    function cssDeclOpts() {
+        return { context: 'declarationList', ...__uv.meta };
+    };
+
+    // Shared utility: source a CSS value property
+    function sourceCSSValue(rawValue) {
+        return __uv.sourceCSS(rawValue, cssValueOpts());
+    };
+
+    // Shared utility: rewrite a CSS value property
+    function rewriteCSSValue(rawValue) {
+        return __uv.rewriteCSS(rawValue, cssValueOpts());
+    };
+
     client.style.on('setProperty', event => {
         if (client.style.dashedUrlProps.includes(event.data.property)) {
-            event.data.value = __uv.rewriteCSS(event.data.value, {
-                context: 'value',
-                ...__uv.meta
-            })
+            event.data.value = rewriteCSSValue(event.data.value);
         };
     });
 
     client.style.on('getPropertyValue', event => {
         if (client.style.dashedUrlProps.includes(event.data.property)) {
             event.respondWith(
-                __uv.sourceCSS(
-                    event.target.call(event.that, event.data.property),
-                    {
-                        context: 'value',
-                        ...__uv.meta
-                    }
-                )
+                sourceCSSValue(event.target.call(event.that, event.data.property))
             );
         };
     });
@@ -812,22 +777,10 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
         for (const key of client.style.urlProps) {
             client.overrideDescriptor(window.CSS2Properties.prototype, key, {
                 get: (target, that) => {
-                    return __uv.sourceCSS(
-                        target.call(that),
-                        {
-                            context: 'value',
-                            ...__uv.meta
-                        }
-                    )
+                    return sourceCSSValue(target.call(that));
                 },
                 set: (target, that, val) => {
-                    target.call(
-                        that,
-                        __uv.rewriteCSS(val, {
-                            context: 'value',
-                            ...__uv.meta
-                        })
-                    );
+                    target.call(that, rewriteCSSValue(val));
                 }
             });
         };
@@ -847,21 +800,12 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
                                 configurable: true,
                                 get() {
                                     const value = client.style.getPropertyValue.call(this, key) || '';
-                                    return __uv.sourceCSS(
-                                        value,
-                                        {
-                                            context: 'value',
-                                            ...__uv.meta
-                                        }
-                                    )
+                                    return sourceCSSValue(value);
                                 },
                                 set(val) {
                                     client.style.setProperty.call(this, 
                                         (client.style.propToDashed[key] || key),
-                                        __uv.rewriteCSS(val, {
-                                            context: 'value',
-                                            ...__uv.meta
-                                        })    
+                                        rewriteCSSValue(val)
                                     )
                                 }
                             });
@@ -878,17 +822,11 @@ async function __uvHook(window, config = {}, bare = '/bare/') {
     };
 
     client.style.on('setCssText', event => {
-        event.data.value = __uv.rewriteCSS(event.data.value, {
-            context: 'declarationList',
-            ...__uv.meta
-        });
+        event.data.value = __uv.rewriteCSS(event.data.value, cssDeclOpts());
     });
 
     client.style.on('getCssText', event => {
-        event.data.value = __uv.sourceCSS(event.data.value, {
-            context: 'declarationList',
-            ...__uv.meta
-        });
+        event.data.value = __uv.sourceCSS(event.data.value, cssDeclOpts());
     });
 
     // Proper hash emulation.
